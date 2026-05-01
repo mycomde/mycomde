@@ -3,14 +3,15 @@
 Market Heatmap Dashboard
 ━━━━━━━━━━━━━━━━━━━━━━━━
 Tracks S&P 500, Dow Jones, and NASDAQ 100 in real time.
-Data from Polygon.io. Runs in your browser at http://127.0.0.1:8050
+Data from Finnhub (free). Runs in your browser at http://127.0.0.1:8050
 """
 
 import os
 import time
+import threading
 import requests
 import pandas as pd
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from dotenv import load_dotenv
 
 import dash
@@ -21,8 +22,8 @@ load_dotenv()
 
 # ─── API ─────────────────────────────────────────────────────────────────────
 
-API_KEY  = os.getenv("POLYGON_API_KEY", "")
-BASE_URL = "https://api.polygon.io"
+API_KEY  = os.getenv("FINNHUB_API_KEY", "")
+BASE_URL = "https://finnhub.io/api/v1"
 
 # ─── Stock Lists ─────────────────────────────────────────────────────────────
 
@@ -67,10 +68,9 @@ SP500 = [
     "DOCU", "ZM",   "TWLO", "OKTA", "SPLK",  "CTSH", "MCHP", "ON",   "GILD", "AEP",
     "XEL",  "WBD",  "SIRI", "BIDU", "NTES",  "TEAM", "ENPH", "VRTX", "GEHC", "DOW",
 ]
-SP500 = list(dict.fromkeys(SP500))  # Remove duplicates, preserve order
+SP500 = list(dict.fromkeys(SP500))
 
 # ─── Approximate market caps (billions USD) ───────────────────────────────────
-# Used to size boxes in the heatmap. Updated periodically — not real-time.
 
 MARKET_CAPS = {
     "AAPL":3000,"MSFT":3000,"NVDA":2500,"AMZN":2000,"META":1400,"GOOGL":1900,
@@ -103,14 +103,12 @@ MARKET_CAPS = {
     "CNC":40,   "MOH":22,   "IQV":35,   "LH":18,    "DGX":14,   "CVS":80,
     "MCK":65,   "SYY":20,   "GIS":35,   "CL":50,    "KMB":40,   "UNP":130,
     "NSC":60,   "CSX":55,   "ODFL":45,  "FAST":38,  "ASML":300, "TMUS":200,
-    "BIDU":35,  "NTES":25,  "JD":22,    "PDD":200,  "SGEN":30,  "ILMN":25,
-    "ALGN":20,  "ANSS":15,  "ZS":35,    "EBAY":25,  "LULU":55,  "MTCH":12,
-    "WDAY":55,  "DXCM":30,  "FANG":35,  "CPRT":55,  "ROST":45,  "IDXX":30,
-    "PCAR":40,  "VRSK":35,  "EXC":35,   "BIIB":38,  "DLTR":22,  "TTWO":20,
-    "KDP":45,   "CEG":40,   "MAR":65,   "AZN":220,  "MNST":55,  "PAYX":55,
-    "CHTR":50,  "EMR":45,   "ETN":65,   "ROK":25,   "PH":55,    "EQIX":75,
-    "PYPL":75,  "MDLZ":90,  "WBD":25,   "CCEP":30,  "CSGP":25,  "XEL":30,
-    "HOOD":8,   "LCID":7,   "PTON":5,   "U":12,     "TWLO":10,  "SPOT":35,
+    "BIDU":35,  "NTES":25,  "JD":22,    "PDD":200,  "ILMN":25,  "ALGN":20,
+    "ANSS":15,  "EBAY":25,  "LULU":55,  "MTCH":12,  "WDAY":55,  "DXCM":30,
+    "FANG":35,  "CPRT":55,  "ROST":45,  "IDXX":30,  "PCAR":40,  "VRSK":35,
+    "EXC":35,   "BIIB":38,  "DLTR":22,  "TTWO":20,  "KDP":45,   "CEG":40,
+    "AZN":220,  "MNST":55,  "CHTR":50,  "EMR":45,   "ETN":65,   "ROK":25,
+    "HOOD":8,   "LCID":7,   "PTON":5,   "U":12,     "TWLO":10,
 }
 
 # ─── Index config ─────────────────────────────────────────────────────────────
@@ -121,90 +119,122 @@ INDICES = {
     "ndq":   {"name": "NASDAQ 100", "tickers": NASDAQ_100, "proxy": "QQQ"},
 }
 
-# ─── Data fetching ────────────────────────────────────────────────────────────
+# All unique tickers across every index
+ALL_TICKERS = list(dict.fromkeys(SP500 + DOW_30 + NASDAQ_100 + ["SPY", "DIA", "QQQ"]))
 
-def _get(url, params=None, timeout=10):
+# ─── Live data cache ──────────────────────────────────────────────────────────
+# Background thread fills this continuously. Dashboard reads from it.
+
+_cache      = {}        # {ticker: {price, pct_change}}
+_cache_lock = threading.Lock()
+_intraday   = {}        # {proxy: DataFrame}
+_intraday_lock = threading.Lock()
+
+# ─── Finnhub API helpers ──────────────────────────────────────────────────────
+
+def _get(endpoint, params=None):
     if params is None:
         params = {}
-    params["apiKey"] = API_KEY
+    params["token"] = API_KEY
     try:
-        r = requests.get(f"{BASE_URL}{url}", params=params, timeout=timeout)
+        r = requests.get(f"{BASE_URL}{endpoint}", params=params, timeout=8)
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        print(f"  API error [{url}]: {e}")
+        print(f"  API error [{endpoint}]: {e}")
         return {}
 
 
-def fetch_snapshots(tickers):
-    """Return dict of ticker -> {price, pct_change, volume} for all tickers."""
-    results = {}
-    for i in range(0, len(tickers), 200):
-        batch = tickers[i : i + 200]
-        data  = _get(
-            "/v2/snapshot/locale/us/markets/stocks/tickers",
-            {"tickers": ",".join(batch)},
-        )
-        for item in data.get("tickers", []):
-            sym       = item.get("ticker", "")
-            day       = item.get("day", {})
-            prev_day  = item.get("prevDay", {})
-            last      = item.get("lastTrade", {})
-
-            price      = day.get("c") or last.get("p") or 0
-            prev_close = prev_day.get("c") or 0
-            pct        = ((price - prev_close) / prev_close * 100) if prev_close else 0
-
-            results[sym] = {
-                "price":      round(price, 2),
-                "pct_change": round(pct,   2),
-                "volume":     day.get("v", 0),
-            }
-        time.sleep(0.15)
-    return results
+def fetch_quote(ticker):
+    """Fetch real-time quote for one ticker. Returns dict or None."""
+    data = _get("/quote", {"symbol": ticker})
+    price      = data.get("c", 0)   # current price
+    prev_close = data.get("pc", 0)  # previous close
+    if not price or not prev_close:
+        return None
+    pct = (price - prev_close) / prev_close * 100
+    return {"price": round(price, 2), "pct_change": round(pct, 2)}
 
 
-def fetch_intraday(proxy):
-    """Return DataFrame of {time, close} for today's minute bars of the proxy ETF."""
-    today = date.today().isoformat()
-    data  = _get(
-        f"/v2/aggs/ticker/{proxy}/range/1/minute/{today}/{today}",
-        {"adjusted": "true", "sort": "asc", "limit": 500},
-    )
-    bars = data.get("results", [])
-    if not bars:
+def fetch_candles(ticker):
+    """Fetch today's 1-minute bars for the given ticker."""
+    now   = int(datetime.now(timezone.utc).timestamp())
+    # Market open: 9:30 AM ET = 13:30 UTC
+    today = datetime.now(timezone.utc).replace(hour=13, minute=30, second=0, microsecond=0)
+    from_ts = int(today.timestamp())
+    data  = _get("/stock/candle", {
+        "symbol":     ticker,
+        "resolution": "1",
+        "from":       from_ts,
+        "to":         now,
+    })
+    if data.get("s") != "ok" or not data.get("t"):
         return pd.DataFrame()
-    df           = pd.DataFrame(bars)
-    df["time"]   = pd.to_datetime(df["t"], unit="ms", utc=True).dt.tz_convert("US/Eastern")
-    df["close"]  = df["c"]
-    return df[["time", "close"]]
+    df = pd.DataFrame({
+        "time":  pd.to_datetime(data["t"], unit="s", utc=True).tz_convert("US/Eastern"),
+        "close": data["c"],
+    })
+    return df
+
+# ─── Background data fetcher ──────────────────────────────────────────────────
+
+def _background_loop():
+    """
+    Runs forever in a background thread.
+    Cycles through all tickers one by one, updating the cache.
+    Finnhub free tier = 60 calls/minute → sleep 1.1s between calls.
+    """
+    proxies = ["SPY", "DIA", "QQQ"]
+    while True:
+        # Refresh intraday candles for each proxy ETF (once per cycle)
+        for proxy in proxies:
+            df = fetch_candles(proxy)
+            with _intraday_lock:
+                _intraday[proxy] = df
+            time.sleep(1.1)
+
+        # Refresh quotes for all stock tickers
+        for ticker in ALL_TICKERS:
+            quote = fetch_quote(ticker)
+            if quote:
+                with _cache_lock:
+                    _cache[ticker] = quote
+            time.sleep(1.1)
+
+
+def start_background_fetcher():
+    t = threading.Thread(target=_background_loop, daemon=True)
+    t.start()
+    print("  Background data fetcher started.")
 
 # ─── Chart builders ───────────────────────────────────────────────────────────
 
-def build_heatmap(index_key, snapshots):
+def build_heatmap(index_key):
     tickers = INDICES[index_key]["tickers"]
 
     rows = []
+    with _cache_lock:
+        snapshot = dict(_cache)
+
     for sym in tickers:
-        snap = snapshots.get(sym)
-        if not snap:
+        data = snapshot.get(sym)
+        if not data:
             continue
-        mcap  = MARKET_CAPS.get(sym, 5)  # default 5B for unknown
         rows.append({
-            "sym":        sym,
-            "pct":        snap["pct_change"],
-            "mcap":       max(mcap, 0.5),
-            "price":      snap["price"],
-            "label":      f"{sym}  {snap['pct_change']:+.2f}%",
+            "sym":   sym,
+            "pct":   data["pct_change"],
+            "mcap":  max(MARKET_CAPS.get(sym, 5), 0.5),
+            "price": data["price"],
+            "label": f"{sym}  {data['pct_change']:+.2f}%",
         })
 
     fig = go.Figure()
 
     if not rows:
         fig.add_annotation(
-            text="No data — check API key in .env file",
+            text="Loading data... (takes ~30 seconds on first launch)",
             x=0.5, y=0.5, showarrow=False,
-            font=dict(color="#FF3333", size=16),
+            font=dict(color="#FF3333", size=15, family="monospace"),
             xref="paper", yref="paper",
         )
     else:
@@ -252,21 +282,21 @@ def build_heatmap(index_key, snapshots):
     return fig
 
 
-def build_line_chart(proxy, snapshots):
-    df = fetch_intraday(proxy)
+def build_line_chart(proxy):
+    with _intraday_lock:
+        df = _intraday.get(proxy, pd.DataFrame()).copy()
 
-    snap       = snapshots.get(proxy, {})
-    price      = snap.get("price", 0)
-    pct        = snap.get("pct_change", 0)
-    pct_str    = f"{pct:+.2f}%" if pct else ""
-    price_str  = f"${price:.2f}" if price else ""
+    with _cache_lock:
+        snap = _cache.get(proxy, {})
+
+    price = snap.get("price", 0)
+    pct   = snap.get("pct_change", 0)
 
     fig = go.Figure()
 
     if not df.empty:
         open_price = df["close"].iloc[0]
 
-        # Fill area: green above open, red below open
         fig.add_trace(go.Scatter(
             x=df["time"],
             y=df["close"],
@@ -277,50 +307,44 @@ def build_line_chart(proxy, snapshots):
             hovertemplate="%{x|%H:%M}<br>$%{y:.2f}<extra></extra>",
         ))
 
-        # Open price reference line
         fig.add_hline(
             y=open_price,
             line_dash="dot",
-            line_color="#333333",
+            line_color="#2a2a2a",
             line_width=1,
         )
 
-        # Current price label at right edge
         if price:
             color = "#22CC22" if pct >= 0 else "#FF3333"
             fig.add_annotation(
                 x=df["time"].iloc[-1],
                 y=price,
-                text=f" {price_str}  {pct_str}",
+                text=f"  ${price:.2f}  {pct:+.2f}%",
                 showarrow=False,
                 xanchor="left",
                 font=dict(color=color, size=11, family="monospace"),
             )
     else:
         fig.add_annotation(
-            text="Market closed or no intraday data yet",
+            text="Market closed or data loading...",
             x=0.5, y=0.5, showarrow=False,
-            font=dict(color="#444444", size=13, family="monospace"),
+            font=dict(color="#333333", size=13, family="monospace"),
             xref="paper", yref="paper",
         )
 
     fig.update_layout(
         paper_bgcolor="#000000",
         plot_bgcolor="#000000",
-        margin=dict(t=5, b=5, l=70, r=80),
+        margin=dict(t=5, b=5, l=70, r=90),
         font=dict(color="#555555", family="monospace"),
         xaxis=dict(
-            showgrid=False,
-            zeroline=False,
-            showline=False,
+            showgrid=False, zeroline=False, showline=False,
             tickfont=dict(color="#444444", size=10),
             tickformat="%H:%M",
             rangeslider=dict(visible=False),
         ),
         yaxis=dict(
-            showgrid=False,
-            zeroline=False,
-            showline=False,
+            showgrid=False, zeroline=False, showline=False,
             tickfont=dict(color="#444444", size=10),
             tickprefix="$",
             side="left",
@@ -333,11 +357,7 @@ def build_line_chart(proxy, snapshots):
 
 # ─── App layout ───────────────────────────────────────────────────────────────
 
-app = dash.Dash(
-    __name__,
-    title="Market Heatmap",
-    update_title=None,
-)
+app = dash.Dash(__name__, title="Market Heatmap", update_title=None)
 
 app.layout = html.Div(
     style={
@@ -350,106 +370,78 @@ app.layout = html.Div(
         "flexDirection": "column",
     },
     children=[
-
-        # ── Header ──────────────────────────────────────────────────────────
+        # Header
         html.Div(
             style={"display": "flex", "alignItems": "center", "marginBottom": "8px"},
             children=[
-                html.Span(
-                    "MARKET HEATMAP",
-                    style={"color": "#FF3333", "fontSize": "13px", "letterSpacing": "4px"},
-                ),
-                html.Span(
-                    id="last-updated",
-                    style={"color": "#333333", "fontSize": "11px", "marginLeft": "20px"},
-                ),
-                html.Span(
-                    id="market-status",
-                    style={"color": "#555555", "fontSize": "11px", "marginLeft": "12px"},
-                ),
+                html.Span("MARKET HEATMAP",
+                          style={"color": "#FF3333", "fontSize": "13px", "letterSpacing": "4px"}),
+                html.Span(id="last-updated",
+                          style={"color": "#333333", "fontSize": "11px", "marginLeft": "20px"}),
+                html.Span(id="stocks-loaded",
+                          style={"color": "#444444", "fontSize": "11px", "marginLeft": "12px"}),
             ],
         ),
 
-        # ── Tabs ────────────────────────────────────────────────────────────
+        # Tabs
         dcc.Tabs(
-            id="tab",
-            value="sp500",
+            id="tab", value="sp500",
             style={"marginBottom": "8px"},
             colors={"border": "#000000", "primary": "#FF3333", "background": "#000000"},
             children=[
-                dcc.Tab(
-                    label="S&P 500",    value="sp500",
-                    style={"color": "#555555", "backgroundColor": "#000000", "fontSize": "11px"},
-                    selected_style={"color": "#FF3333", "backgroundColor": "#000000",
-                                    "borderTop": "2px solid #FF3333", "fontSize": "11px"},
-                ),
-                dcc.Tab(
-                    label="Dow Jones",  value="dji",
-                    style={"color": "#555555", "backgroundColor": "#000000", "fontSize": "11px"},
-                    selected_style={"color": "#FF3333", "backgroundColor": "#000000",
-                                    "borderTop": "2px solid #FF3333", "fontSize": "11px"},
-                ),
-                dcc.Tab(
-                    label="NASDAQ 100", value="ndq",
-                    style={"color": "#555555", "backgroundColor": "#000000", "fontSize": "11px"},
-                    selected_style={"color": "#FF3333", "backgroundColor": "#000000",
-                                    "borderTop": "2px solid #FF3333", "fontSize": "11px"},
-                ),
+                dcc.Tab(label="S&P 500",    value="sp500",
+                        style={"color":"#555555","backgroundColor":"#000000","fontSize":"11px"},
+                        selected_style={"color":"#FF3333","backgroundColor":"#000000",
+                                        "borderTop":"2px solid #FF3333","fontSize":"11px"}),
+                dcc.Tab(label="Dow Jones",  value="dji",
+                        style={"color":"#555555","backgroundColor":"#000000","fontSize":"11px"},
+                        selected_style={"color":"#FF3333","backgroundColor":"#000000",
+                                        "borderTop":"2px solid #FF3333","fontSize":"11px"}),
+                dcc.Tab(label="NASDAQ 100", value="ndq",
+                        style={"color":"#555555","backgroundColor":"#000000","fontSize":"11px"},
+                        selected_style={"color":"#FF3333","backgroundColor":"#000000",
+                                        "borderTop":"2px solid #FF3333","fontSize":"11px"}),
             ],
         ),
 
-        # ── Heatmap ─────────────────────────────────────────────────────────
-        dcc.Graph(
-            id="heatmap",
-            config={"displayModeBar": False, "scrollZoom": True},
-            style={"flex": "1 1 60%", "minHeight": "0"},
-        ),
+        # Heatmap
+        dcc.Graph(id="heatmap",
+                  config={"displayModeBar": False, "scrollZoom": True},
+                  style={"flex": "1 1 60%", "minHeight": "0"}),
 
-        # ── Divider ─────────────────────────────────────────────────────────
+        # Divider
         html.Div(style={"borderTop": "1px solid #111111", "margin": "6px 0"}),
 
-        # ── Line chart label ────────────────────────────────────────────────
-        html.Span(
-            id="line-label",
-            style={"color": "#FF3333", "fontSize": "10px", "letterSpacing": "2px",
-                   "marginBottom": "2px"},
-        ),
+        # Line chart label
+        html.Span(id="line-label",
+                  style={"color":"#FF3333","fontSize":"10px","letterSpacing":"2px","marginBottom":"2px"}),
 
-        # ── Intraday line chart ──────────────────────────────────────────────
-        dcc.Graph(
-            id="line-chart",
-            config={"displayModeBar": False, "scrollZoom": True},
-            style={"flex": "0 0 28%", "minHeight": "0"},
-        ),
+        # Intraday line chart
+        dcc.Graph(id="line-chart",
+                  config={"displayModeBar": False, "scrollZoom": True},
+                  style={"flex": "0 0 28%", "minHeight": "0"}),
 
-        # ── Auto-refresh timers ──────────────────────────────────────────────
-        # Heatmap: every 60 seconds
-        dcc.Interval(id="tick-heatmap", interval=60_000,  n_intervals=0),
-        # Line chart: every 5 minutes
-        dcc.Interval(id="tick-line",    interval=300_000, n_intervals=0),
+        # Refresh every 30 seconds (reads from cache — no extra API calls)
+        dcc.Interval(id="tick", interval=30_000, n_intervals=0),
     ],
 )
 
 # ─── Callbacks ────────────────────────────────────────────────────────────────
 
 @app.callback(
-    Output("heatmap",       "figure"),
-    Output("last-updated",  "children"),
-    Output("market-status", "children"),
-    Input("tab",            "value"),
-    Input("tick-heatmap",   "n_intervals"),
+    Output("heatmap",      "figure"),
+    Output("last-updated", "children"),
+    Output("stocks-loaded","children"),
+    Input("tab",           "value"),
+    Input("tick",          "n_intervals"),
 )
 def refresh_heatmap(index_key, _):
-    tickers   = INDICES[index_key]["tickers"]
-    snapshots = fetch_snapshots(tickers)
-
-    fig = build_heatmap(index_key, snapshots)
-
-    now    = datetime.now().strftime("%H:%M:%S")
-    loaded = len(snapshots)
-    total  = len(tickers)
-    status = f"{loaded}/{total} stocks loaded"
-
+    fig     = build_heatmap(index_key)
+    now     = datetime.now().strftime("%H:%M:%S")
+    with _cache_lock:
+        loaded = len(_cache)
+    total   = len(ALL_TICKERS)
+    status  = f"{loaded}/{total} tickers cached"
     return fig, f"last updated {now}", status
 
 
@@ -457,47 +449,46 @@ def refresh_heatmap(index_key, _):
     Output("line-chart", "figure"),
     Output("line-label",  "children"),
     Input("tab",          "value"),
-    Input("tick-line",    "n_intervals"),
+    Input("tick",         "n_intervals"),
 )
 def refresh_line(index_key, _):
     cfg   = INDICES[index_key]
     proxy = cfg["proxy"]
-
-    # Fetch current snapshot for the proxy ETF to show price/% on label
-    snap_data = fetch_snapshots([proxy])
-    snap      = snap_data.get(proxy, {})
-    price     = snap.get("price", 0)
-    pct       = snap.get("pct_change", 0)
-
-    pct_color = "#22CC22" if pct >= 0 else "#FF3333"
+    fig   = build_line_chart(proxy)
+    with _cache_lock:
+        snap = _cache.get(proxy, {})
+    price = snap.get("price", 0)
+    pct   = snap.get("pct_change", 0)
     label = (
-        f"{cfg['name']}  ·  {proxy}  ·  "
-        f"${price:.2f}  {pct:+.2f}%  ·  INTRADAY"
+        f"{cfg['name']}  ·  {proxy}  ·  ${price:.2f}  {pct:+.2f}%  ·  INTRADAY"
         if price else
         f"{cfg['name']}  ·  {proxy}  ·  INTRADAY"
     )
-
-    fig = build_line_chart(proxy, snap_data)
     return fig, label
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    bar = "━" * 50
+    bar = "━" * 52
     print(f"\n{bar}")
-    print("  MARKET HEATMAP DASHBOARD")
+    print("  MARKET HEATMAP DASHBOARD  —  Finnhub (free)")
     print(bar)
 
     if not API_KEY or API_KEY == "your_api_key_here":
-        print("\n  ⚠  No API key found!")
-        print("  1. Open the .env file in this folder")
-        print("  2. Replace 'your_api_key_here' with your Polygon.io key")
-        print("  3. Run this script again")
+        print("\n  WARNING: No API key found!")
+        print("  1. Sign up free at https://finnhub.io")
+        print("  2. Copy your API key from the dashboard")
+        print("  3. Open the .env file and paste it in")
+        print("  4. Run this script again\n")
     else:
         print(f"\n  API key: {'*' * 20}{API_KEY[-4:]}")
-        print(f"  Opening:  http://127.0.0.1:8050")
-        print(f"  Stop:     Press Ctrl+C")
+        print(f"  Tickers: {len(ALL_TICKERS)} total")
+        print(f"  Opening: http://127.0.0.1:8050")
+        print(f"  Stop:    Ctrl+C")
+        print(f"\n  Data refreshes every ~{len(ALL_TICKERS) * 1.1 / 60:.0f} min per full cycle")
+        print(f"  Dashboard updates every 30 seconds from local cache")
 
     print(f"{bar}\n")
 
+    start_background_fetcher()
     app.run(debug=False, host="127.0.0.1", port=8050)
