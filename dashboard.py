@@ -7,6 +7,7 @@ Runs in your browser at http://127.0.0.1:8050
 
 import os
 import io
+import json
 import requests
 import pandas as pd
 from datetime import datetime, date
@@ -72,6 +73,41 @@ MARKET_CAPS = {
 _index_history: dict[str, list] = {"sp500": [], "dji": [], "ndq": []}
 _history_lock = __import__("threading").Lock()
 
+HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history.json")
+
+
+def load_history():
+    """Load today's history from disk on startup."""
+    try:
+        with open(HISTORY_FILE, "r") as f:
+            raw = json.load(f)
+        today = date.today().isoformat()
+        for key in _index_history:
+            entries = raw.get(key, [])
+            _index_history[key] = [
+                (datetime.fromisoformat(t), v)
+                for t, v in entries
+                if t[:10] == today
+            ]
+    except Exception:
+        pass
+
+
+def save_history():
+    """Persist today's history to disk."""
+    try:
+        raw = {
+            key: [(t.isoformat(), v) for t, v in vals]
+            for key, vals in _index_history.items()
+        }
+        with open(HISTORY_FILE, "w") as f:
+            json.dump(raw, f)
+    except Exception:
+        pass
+
+
+load_history()
+
 
 def parse_market_cap(value):
     try:
@@ -131,7 +167,7 @@ def compute_weighted_pct(df):
 
 
 def store_snapshot(index_key, wpct):
-    """Append a weighted % snapshot; discard anything from a previous day."""
+    """Append a weighted % snapshot, discard old days, then save to disk."""
     now = datetime.now()
     today = now.date()
     with _history_lock:
@@ -140,6 +176,7 @@ def store_snapshot(index_key, wpct):
             (t, v) for t, v in _index_history[index_key]
             if t.date() == today
         ]
+    save_history()
 
 
 def build_heatmap(df):
