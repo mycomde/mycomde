@@ -8,6 +8,7 @@ Runs in your browser at http://127.0.0.1:8050
 import os
 import io
 import json
+import time
 import requests
 import pandas as pd
 from datetime import datetime, date
@@ -16,6 +17,8 @@ from dotenv import load_dotenv
 import dash
 from dash import dcc, html, Input, Output, State, ctx
 import plotly.graph_objects as go
+
+_last_refresh_time = time.time()
 
 load_dotenv()
 
@@ -248,7 +251,8 @@ def build_line_chart(index_key):
                    ticksuffix="%", side="left"),
         hovermode="x unified",
         hoverlabel=dict(bgcolor="#111111",font_color="#CCCCCC",font_family="monospace"),
-        dragmode="pan")
+        dragmode="pan",
+        uirevision=index_key)
     return fig
 
 
@@ -298,6 +302,9 @@ app.layout = html.Div(
                 html.Div(
                     style={"marginLeft":"auto","display":"flex","alignItems":"center"},
                     children=[
+                        html.Span(id="countdown",
+                            style={"color":"#555555","fontSize":"10px","fontFamily":"monospace",
+                                   "letterSpacing":"1px","marginRight":"16px"}),
                         html.Span("LAYOUT", style={"color":"#333","fontSize":"10px",
                                                     "letterSpacing":"2px","marginRight":"6px"}),
                         html.Button("1", id="btn-1", n_clicks=0, style=BTN_ACTIVE),
@@ -438,6 +445,7 @@ app.layout = html.Div(
             ]),
 
         dcc.Interval(id="tick", interval=60_000, n_intervals=0),
+        dcc.Interval(id="tick-1s", interval=1_000, n_intervals=0),
     ])
 
 
@@ -512,12 +520,14 @@ def pick_pair(n_sp, n_dji, n_ndq, current_pair):
     Input("tick", "n_intervals"),
 )
 def refresh_heatmap_1(index_key, _):
+    global _last_refresh_time
     df  = fetch_index_data(index_key)
     fig = build_heatmap(df)
     wpct = compute_weighted_pct(df)
     if wpct is not None:
         store_snapshot(index_key, wpct)
     count = len(df) if not df.empty else 0
+    _last_refresh_time = time.time()
     return fig, f"last updated {datetime.now().strftime('%H:%M:%S')}", f"{count} stocks"
 
 
@@ -589,6 +599,18 @@ def refresh_layout_3(_, layout):
     heatmaps = [build_heatmap(df) for df in dfs]
     lines    = [build_line_chart(k) for k in keys]
     return heatmaps[0], heatmaps[1], heatmaps[2], lines[0], lines[1], lines[2]
+
+
+# ─── Countdown callback ───────────────────────────────────────────────────────
+
+@app.callback(
+    Output("countdown", "children"),
+    Input("tick-1s", "n_intervals"),
+)
+def update_countdown(_):
+    elapsed = int(time.time() - _last_refresh_time)
+    remaining = max(0, 60 - elapsed)
+    return f"NEXT UPDATE  {remaining}s"
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
