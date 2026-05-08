@@ -5,24 +5,19 @@ Uses Finviz Elite API — gets all stocks in one call.
 Runs in your browser at http://127.0.0.1:8050
 """
 
-import os
-import io
-import json
-import time
-import requests
-import pandas as pd
-from datetime import datetime, date
+import os, io, json, time, threading, requests, pandas as pd
+from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 import dash
 from dash import dcc, html, Input, Output, State, ctx
 import plotly.graph_objects as go
 
-_last_refresh_time = time.time()
-
 load_dotenv()
-
 API_KEY = os.getenv("FINVIZ_API_KEY", "")
+ET = ZoneInfo("America/New_York")
+_last_refresh_time = time.time()
 
 INDICES = {
     "sp500": {"name": "S&P 500",    "filter": "idx_sp500"},
@@ -71,33 +66,50 @@ MARKET_CAPS = {
     "KEY":18,   "CFG":20,   "RF":20,    "HBAN":18,  "MTB":25,   "C":145,
 }
 
-_index_history: dict[str, list] = {"sp500": [], "dji": [], "ndq": []}
-_history_lock = __import__("threading").Lock()
+# Multi-day history: {key: {date_str: [(datetime, value), ...]}}
+_index_history: dict = {"sp500": {}, "dji": {}, "ndq": {}}
+_history_lock = threading.Lock()
 HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history.json")
+
+# Heatmap cache populated by background thread
+_heatmap_cache: dict = {"sp500": pd.DataFrame(), "dji": pd.DataFrame(), "ndq": pd.DataFrame()}
+_cache_lock = threading.Lock()
 
 
 def load_history():
     try:
         with open(HISTORY_FILE, "r") as f:
             raw = json.load(f)
-        today = date.today().isoformat()
         for key in _index_history:
-            entries = raw.get(key, [])
-            _index_history[key] = [
-                (datetime.fromisoformat(t), v)
-                for t, v in entries
-                if t[:10] == today
-            ]
+            if key not in raw:
+                continue
+            val = raw[key]
+            if isinstance(val, dict):
+                for d, entries in val.items():
+                    _index_history[key][d] = [
+                        (datetime.fromisoformat(t), v)
+                        for t, v in entries
+                    ]
+            elif isinstance(val, list):
+                # migrate old flat format to today's date
+                today = date.today().isoformat()
+                _index_history[key][today] = [
+                    (datetime.fromisoformat(t), v)
+                    for t, v in val
+                    if t[:10] == today
+                ]
     except Exception:
         pass
 
 
 def save_history():
     try:
-        raw = {
-            key: [(t.isoformat(), v) for t, v in vals]
-            for key, vals in _index_history.items()
-        }
+        raw = {}
+        for key, day_data in _index_history.items():
+            raw[key] = {
+                d: [(t.isoformat(), v) for t, v in entries]
+                for d, entries in day_data.items()
+            }
         with open(HISTORY_FILE, "w") as f:
             json.dump(raw, f)
     except Exception:
@@ -105,6 +117,15 @@ def save_history():
 
 
 load_history()
+
+
+def is_market_hours():
+    n = datetime.now(ET)
+    if n.weekday() >= 5:
+        return False
+    open_t  = n.replace(hour=9,  minute=30, second=0, microsecond=0)
+    close_t = n.replace(hour=16, minute=0,  second=0, microsecond=0)
+    return open_t <= n <= close_t
 
 
 def parse_market_cap(value):
@@ -163,15 +184,38 @@ def compute_weighted_pct(df):
 
 
 def store_snapshot(index_key, wpct):
+    if not is_market_hours():
+        return
     now = datetime.now()
-    today = now.date()
+    d = date.today().isoformat()
     with _history_lock:
-        _index_history[index_key].append((now, wpct))
-        _index_history[index_key] = [
-            (t, v) for t, v in _index_history[index_key]
-            if t.date() == today
-        ]
+        day_data = _index_history[index_key]
+        day_data.setdefault(d, []).append((now, wpct))
+        for old_d in sorted(day_data.keys())[:-7]:
+            del day_data[old_d]
     save_history()
+
+
+def _bg_loop():
+    global _last_refresh_time
+    while True:
+        try:
+            for key in INDICES:
+                df = fetch_index_data(key)
+                with _cache_lock:
+                    _heatmap_cache[key] = df
+                wpct = compute_weighted_pct(df)
+                if wpct is not None:
+                    store_snapshot(key, wpct)
+            _last_refresh_time = time.time()
+            print(f"  BG updated at {datetime.now().strftime('%H:%M:%S')}"
+                  f"  {'(market open)' if is_market_hours() else '(market closed)'}")
+        except Exception as e:
+            print(f"  BG loop error: {e}")
+        time.sleep(60 if is_market_hours() else 300)
+
+
+threading.Thread(target=_bg_loop, daemon=True).start()
 
 
 def build_heatmap(df):
@@ -213,13 +257,18 @@ def build_heatmap(df):
     return fig
 
 
-def build_line_chart(index_key):
+def build_line_chart(index_key, selected_date=None):
+    if selected_date is None:
+        selected_date = date.today().isoformat()
     with _history_lock:
-        history = list(_index_history[index_key])
+        day_data = _index_history[index_key]
+        history  = list(day_data.get(selected_date, []))
     fig = go.Figure()
+    is_today = selected_date == date.today().isoformat()
     if len(history) < 2:
+        msg = "Builds during market hours" if is_today else "No data for this day"
         fig.add_annotation(
-            text="Builds during market hours",
+            text=msg,
             x=0.5, y=0.5, showarrow=False,
             font=dict(color="#333333", size=11, family="monospace"),
             xref="paper", yref="paper")
@@ -227,11 +276,12 @@ def build_line_chart(index_key):
         times  = [h[0] for h in history]
         values = [h[1] for h in history]
         last   = values[-1]
-        color  = "#22CC22" if last >= 0 else "#FF3333"
+        color      = "#22CC22" if last >= 0 else "#FF3333"
+        fill_color = "rgba(34,204,34,0.05)" if last >= 0 else "rgba(255,51,51,0.05)"
         fig.add_trace(go.Scatter(
             x=times, y=values, mode="lines",
-            line=dict(color="#FF3333", width=1.5),
-            fill="tozeroy", fillcolor="rgba(255,51,51,0.05)",
+            line=dict(color=color, width=1.5),
+            fill="tozeroy", fillcolor=fill_color,
             hovertemplate="%{x|%H:%M}<br>%{y:+.3f}%<extra></extra>"))
         fig.add_hline(y=0, line_dash="dot", line_color="#2a2a2a", line_width=1)
         fig.add_annotation(
@@ -252,30 +302,40 @@ def build_line_chart(index_key):
         hovermode="x unified",
         hoverlabel=dict(bgcolor="#111111",font_color="#CCCCCC",font_family="monospace"),
         dragmode="pan",
-        uirevision=index_key)
+        uirevision=f"{index_key}_{selected_date}")
     return fig
 
 
 # ─── Styles ───────────────────────────────────────────────────────────────────
 
 BTN_BASE = {
-    "background": "#111111",
-    "color": "#555555",
-    "border": "1px solid #222222",
+    "background":   "#111111",
+    "color":        "#555555",
+    "border":       "1px solid #222222",
     "borderRadius": "3px",
-    "padding": "3px 8px",
-    "fontSize": "11px",
-    "fontFamily": "monospace",
-    "cursor": "pointer",
-    "marginLeft": "4px",
+    "padding":      "3px 8px",
+    "fontSize":     "11px",
+    "fontFamily":   "monospace",
+    "cursor":       "pointer",
+    "marginLeft":   "4px",
 }
-BTN_ACTIVE = {**BTN_BASE, "background": "#FF3333", "color": "#FFFFFF", "border": "1px solid #FF3333"}
+BTN_ACTIVE = {**BTN_BASE, "background":"#FF3333","color":"#FFFFFF","border":"1px solid #FF3333"}
 
-TAB_STYLE         = {"color":"#555555","backgroundColor":"#000000","fontSize":"11px"}
-TAB_SELECTED      = {"color":"#FF3333","backgroundColor":"#000000",
-                     "borderTop":"2px solid #FF3333","fontSize":"11px"}
+SWAP_BTN = {
+    "background": "transparent",
+    "color":      "#555555",
+    "border":     "none",
+    "fontSize":   "14px",
+    "fontFamily": "monospace",
+    "cursor":     "pointer",
+    "padding":    "0 3px",
+    "lineHeight": "1",
+}
 
-INDEX_KEYS = ["sp500", "dji", "ndq"]
+TAB_STYLE    = {"color":"#555555","backgroundColor":"#000000","fontSize":"11px"}
+TAB_SELECTED = {"color":"#FF3333","backgroundColor":"#000000",
+                "borderTop":"2px solid #FF3333","fontSize":"11px"}
+
 INDEX_NAMES = {"sp500": "S&P 500", "dji": "Dow Jones", "ndq": "NASDAQ 100"}
 
 # ─── App ──────────────────────────────────────────────────────────────────────
@@ -290,39 +350,59 @@ app.layout = html.Div(
 
         # ── Header ────────────────────────────────────────────────────────────
         html.Div(
-            style={"display":"flex","alignItems":"center","marginBottom":"8px","flexShrink":"0"},
+            style={"display":"flex","alignItems":"center","marginBottom":"8px",
+                   "flexShrink":"0","flexWrap":"wrap","gap":"4px"},
             children=[
                 html.Span("MARKET HEATMAP",
                     style={"color":"#FF3333","fontSize":"13px","letterSpacing":"4px"}),
+                html.Span(id="market-status",
+                    style={"color":"#333333","fontSize":"10px","marginLeft":"12px",
+                           "letterSpacing":"1px"}),
                 html.Span(id="last-updated",
-                    style={"color":"#333333","fontSize":"11px","marginLeft":"20px"}),
+                    style={"color":"#333333","fontSize":"11px","marginLeft":"12px"}),
                 html.Span(id="stocks-loaded",
-                    style={"color":"#444444","fontSize":"11px","marginLeft":"12px"}),
-                # Layout buttons — right side
+                    style={"color":"#444444","fontSize":"11px","marginLeft":"6px"}),
+                # Right side
                 html.Div(
-                    style={"marginLeft":"auto","display":"flex","alignItems":"center"},
+                    style={"marginLeft":"auto","display":"flex","alignItems":"center","gap":"2px"},
                     children=[
+                        # Date navigation
+                        html.Button("◀", id="btn-prev-date", n_clicks=0,
+                            style={**BTN_BASE,"marginLeft":"0","padding":"3px 6px"}),
+                        html.Span(id="date-display", children="TODAY",
+                            style={"color":"#888888","fontSize":"10px","fontFamily":"monospace",
+                                   "letterSpacing":"1px","minWidth":"58px","textAlign":"center",
+                                   "display":"inline-block"}),
+                        html.Button("▶", id="btn-next-date", n_clicks=0,
+                            style={**BTN_BASE,"padding":"3px 6px"}),
+                        html.Button("TODAY", id="btn-today", n_clicks=0,
+                            style={**BTN_BASE,"fontSize":"9px","letterSpacing":"1px"}),
+                        # Spacer
+                        html.Span(style={"display":"inline-block","width":"14px"}),
                         html.Span(id="countdown",
-                            style={"color":"#555555","fontSize":"10px","fontFamily":"monospace",
-                                   "letterSpacing":"1px","marginRight":"16px"}),
-                        html.Span("LAYOUT", style={"color":"#333","fontSize":"10px",
-                                                    "letterSpacing":"2px","marginRight":"6px"}),
+                            style={"color":"#444444","fontSize":"10px","fontFamily":"monospace",
+                                   "letterSpacing":"1px"}),
+                        html.Span(style={"display":"inline-block","width":"10px"}),
+                        html.Span("LAYOUT",
+                            style={"color":"#333","fontSize":"10px","letterSpacing":"2px"}),
                         html.Button("1", id="btn-1", n_clicks=0, style=BTN_ACTIVE),
                         html.Button("2", id="btn-2", n_clicks=0, style=BTN_BASE),
                         html.Button("3", id="btn-3", n_clicks=0, style=BTN_BASE),
-                    ]
-                ),
+                    ]),
             ]),
 
         # State stores
-        dcc.Store(id="layout-store", data="1"),
-        dcc.Store(id="pair-store", data=["sp500", "dji"]),
+        dcc.Store(id="layout-store",  data="1"),
+        dcc.Store(id="pair-store",    data=["sp500", "dji"]),
+        dcc.Store(id="panel-order",   data=["sp500", "dji", "ndq"]),
+        dcc.Store(id="selected-date", data=date.today().isoformat()),
 
-        # ── Layout 1: single index with tabs ──────────────────────────────────
+        # ── Layout 1 ─────────────────────────────────────────────────────────
         html.Div(id="view-1",
             style={"display":"flex","flexDirection":"column","flex":"1","minHeight":"0"},
             children=[
-                dcc.Tabs(id="tab", value="sp500", style={"marginBottom":"6px","flexShrink":"0"},
+                dcc.Tabs(id="tab", value="sp500",
+                    style={"marginBottom":"6px","flexShrink":"0"},
                     colors={"border":"#000000","primary":"#FF3333","background":"#000000"},
                     children=[
                         dcc.Tab(label="S&P 500",    value="sp500",
@@ -344,27 +424,28 @@ app.layout = html.Div(
                     style={"flex":"0 0 28%","minHeight":"0"}),
             ]),
 
-        # ── Layout 2: pick any 2 indices ──────────────────────────────────────
+        # ── Layout 2 ─────────────────────────────────────────────────────────
         html.Div(id="view-2",
             style={"display":"none","flexDirection":"column","flex":"1","minHeight":"0"},
             children=[
-                # Picker row
                 html.Div(id="picker-2",
                     style={"display":"flex","gap":"6px","marginBottom":"6px","flexShrink":"0"},
                     children=[
-                        html.Span("SHOW:", style={"color":"#333","fontSize":"10px",
-                                                   "letterSpacing":"2px","alignSelf":"center"}),
+                        html.Span("SHOW:",
+                            style={"color":"#333","fontSize":"10px","letterSpacing":"2px",
+                                   "alignSelf":"center"}),
                         html.Button("S&P 500",    id="p2-sp500", n_clicks=0,
-                            style={**BTN_ACTIVE, "marginLeft":"6px"}),
+                            style={**BTN_ACTIVE,"marginLeft":"6px"}),
                         html.Button("Dow Jones",  id="p2-dji",   n_clicks=0,
-                            style={**BTN_ACTIVE}),
+                            style=BTN_ACTIVE),
                         html.Button("NASDAQ 100", id="p2-ndq",   n_clicks=0,
-                            style={**BTN_BASE}),
+                            style=BTN_BASE),
                     ]),
-                # Two panels side by side
-                html.Div(style={"display":"flex","flex":"1 1 62%","gap":"4px","minHeight":"0"},
+                html.Div(
+                    style={"display":"flex","flex":"1 1 62%","gap":"4px","minHeight":"0"},
                     children=[
-                        html.Div(style={"flex":"1","display":"flex","flexDirection":"column","minHeight":"0"},
+                        html.Div(
+                            style={"flex":"1","display":"flex","flexDirection":"column","minHeight":"0"},
                             children=[
                                 html.Span(id="label-2a",
                                     style={"color":"#FF3333","fontSize":"10px","letterSpacing":"2px",
@@ -373,7 +454,8 @@ app.layout = html.Div(
                                     config={"displayModeBar":False,"scrollZoom":True},
                                     style={"flex":"1","minHeight":"0"}),
                             ]),
-                        html.Div(style={"flex":"1","display":"flex","flexDirection":"column","minHeight":"0"},
+                        html.Div(
+                            style={"flex":"1","display":"flex","flexDirection":"column","minHeight":"0"},
                             children=[
                                 html.Span(id="label-2b",
                                     style={"color":"#FF3333","fontSize":"10px","letterSpacing":"2px",
@@ -384,7 +466,8 @@ app.layout = html.Div(
                             ]),
                     ]),
                 html.Div(style={"borderTop":"1px solid #111","margin":"4px 0","flexShrink":"0"}),
-                html.Div(style={"display":"flex","flex":"0 0 28%","gap":"4px","minHeight":"0"},
+                html.Div(
+                    style={"display":"flex","flex":"0 0 28%","gap":"4px","minHeight":"0"},
                     children=[
                         dcc.Graph(id="line-2a",
                             config={"displayModeBar":False,"scrollZoom":True},
@@ -395,42 +478,75 @@ app.layout = html.Div(
                     ]),
             ]),
 
-        # ── Layout 3: all 3 indices ────────────────────────────────────────────
+        # ── Layout 3 — all 3 with swap buttons ───────────────────────────────
         html.Div(id="view-3",
             style={"display":"none","flexDirection":"column","flex":"1","minHeight":"0"},
             children=[
-                html.Div(style={"display":"flex","flex":"1 1 62%","gap":"4px","minHeight":"0"},
+                html.Div(
+                    style={"display":"flex","flex":"1 1 62%","gap":"4px","minHeight":"0"},
                     children=[
-                        html.Div(style={"flex":"1","display":"flex","flexDirection":"column","minHeight":"0"},
+                        # Panel A (leftmost)
+                        html.Div(
+                            style={"flex":"1","display":"flex","flexDirection":"column","minHeight":"0"},
                             children=[
-                                html.Span("S&P 500",
-                                    style={"color":"#FF3333","fontSize":"10px","letterSpacing":"2px",
-                                           "marginBottom":"2px","flexShrink":"0"}),
+                                html.Div(
+                                    style={"display":"flex","alignItems":"center",
+                                           "marginBottom":"2px","flexShrink":"0"},
+                                    children=[
+                                        html.Span(id="title-3a",
+                                            style={"color":"#FF3333","fontSize":"10px",
+                                                   "letterSpacing":"2px","flex":"1"}),
+                                        html.Button("▶", id="swap-right-0", n_clicks=0,
+                                            style=SWAP_BTN),
+                                    ]),
                                 dcc.Graph(id="heatmap-3a",
                                     config={"displayModeBar":False,"scrollZoom":True},
                                     style={"flex":"1","minHeight":"0"}),
                             ]),
-                        html.Div(style={"flex":"1","display":"flex","flexDirection":"column","minHeight":"0"},
+                        # Panel B (middle)
+                        html.Div(
+                            style={"flex":"1","display":"flex","flexDirection":"column","minHeight":"0"},
                             children=[
-                                html.Span("DOW JONES",
-                                    style={"color":"#FF3333","fontSize":"10px","letterSpacing":"2px",
-                                           "marginBottom":"2px","flexShrink":"0"}),
+                                html.Div(
+                                    style={"display":"flex","alignItems":"center",
+                                           "marginBottom":"2px","flexShrink":"0"},
+                                    children=[
+                                        html.Button("◀", id="swap-left-1", n_clicks=0,
+                                            style={**SWAP_BTN,"marginRight":"4px"}),
+                                        html.Span(id="title-3b",
+                                            style={"color":"#FF3333","fontSize":"10px",
+                                                   "letterSpacing":"2px","flex":"1",
+                                                   "textAlign":"center"}),
+                                        html.Button("▶", id="swap-right-1", n_clicks=0,
+                                            style=SWAP_BTN),
+                                    ]),
                                 dcc.Graph(id="heatmap-3b",
                                     config={"displayModeBar":False,"scrollZoom":True},
                                     style={"flex":"1","minHeight":"0"}),
                             ]),
-                        html.Div(style={"flex":"1","display":"flex","flexDirection":"column","minHeight":"0"},
+                        # Panel C (rightmost)
+                        html.Div(
+                            style={"flex":"1","display":"flex","flexDirection":"column","minHeight":"0"},
                             children=[
-                                html.Span("NASDAQ 100",
-                                    style={"color":"#FF3333","fontSize":"10px","letterSpacing":"2px",
-                                           "marginBottom":"2px","flexShrink":"0"}),
+                                html.Div(
+                                    style={"display":"flex","alignItems":"center",
+                                           "marginBottom":"2px","flexShrink":"0"},
+                                    children=[
+                                        html.Button("◀", id="swap-left-2", n_clicks=0,
+                                            style={**SWAP_BTN,"marginRight":"4px"}),
+                                        html.Span(id="title-3c",
+                                            style={"color":"#FF3333","fontSize":"10px",
+                                                   "letterSpacing":"2px","flex":"1",
+                                                   "textAlign":"right"}),
+                                    ]),
                                 dcc.Graph(id="heatmap-3c",
                                     config={"displayModeBar":False,"scrollZoom":True},
                                     style={"flex":"1","minHeight":"0"}),
                             ]),
                     ]),
                 html.Div(style={"borderTop":"1px solid #111","margin":"4px 0","flexShrink":"0"}),
-                html.Div(style={"display":"flex","flex":"0 0 28%","gap":"4px","minHeight":"0"},
+                html.Div(
+                    style={"display":"flex","flex":"0 0 28%","gap":"4px","minHeight":"0"},
                     children=[
                         dcc.Graph(id="line-3a",
                             config={"displayModeBar":False,"scrollZoom":True},
@@ -444,33 +560,33 @@ app.layout = html.Div(
                     ]),
             ]),
 
-        dcc.Interval(id="tick", interval=60_000, n_intervals=0),
-        dcc.Interval(id="tick-1s", interval=1_000, n_intervals=0),
+        dcc.Interval(id="tick",    interval=60_000, n_intervals=0),
+        dcc.Interval(id="tick-1s", interval=1_000,  n_intervals=0),
     ])
 
 
 # ─── Layout toggle ────────────────────────────────────────────────────────────
 
 @app.callback(
-    Output("layout-store", "data"),
-    Output("view-1", "style"),
-    Output("view-2", "style"),
-    Output("view-3", "style"),
-    Output("btn-1", "style"),
-    Output("btn-2", "style"),
-    Output("btn-3", "style"),
-    Input("btn-1", "n_clicks"),
-    Input("btn-2", "n_clicks"),
-    Input("btn-3", "n_clicks"),
+    Output("layout-store","data"),
+    Output("view-1","style"),
+    Output("view-2","style"),
+    Output("view-3","style"),
+    Output("btn-1","style"),
+    Output("btn-2","style"),
+    Output("btn-3","style"),
+    Input("btn-1","n_clicks"),
+    Input("btn-2","n_clicks"),
+    Input("btn-3","n_clicks"),
     prevent_initial_call=True,
 )
 def toggle_layout(n1, n2, n3):
-    triggered = ctx.triggered_id
-    show  = {"display":"flex","flexDirection":"column","flex":"1","minHeight":"0"}
-    hide  = {"display":"none"}
-    if triggered == "btn-2":
+    t = ctx.triggered_id
+    show = {"display":"flex","flexDirection":"column","flex":"1","minHeight":"0"}
+    hide = {"display":"none"}
+    if t == "btn-2":
         return "2", hide, show, hide, BTN_BASE, BTN_ACTIVE, BTN_BASE
-    if triggered == "btn-3":
+    if t == "btn-3":
         return "3", hide, hide, show, BTN_BASE, BTN_BASE, BTN_ACTIVE
     return "1", show, hide, hide, BTN_ACTIVE, BTN_BASE, BTN_BASE
 
@@ -478,21 +594,20 @@ def toggle_layout(n1, n2, n3):
 # ─── Layout 2 pair picker ─────────────────────────────────────────────────────
 
 @app.callback(
-    Output("pair-store",  "data"),
-    Output("p2-sp500", "style"),
-    Output("p2-dji",   "style"),
-    Output("p2-ndq",   "style"),
-    Input("p2-sp500", "n_clicks"),
-    Input("p2-dji",   "n_clicks"),
-    Input("p2-ndq",   "n_clicks"),
-    State("pair-store", "data"),
+    Output("pair-store","data"),
+    Output("p2-sp500","style"),
+    Output("p2-dji","style"),
+    Output("p2-ndq","style"),
+    Input("p2-sp500","n_clicks"),
+    Input("p2-dji","n_clicks"),
+    Input("p2-ndq","n_clicks"),
+    State("pair-store","data"),
     prevent_initial_call=True,
 )
 def pick_pair(n_sp, n_dji, n_ndq, current_pair):
-    triggered = ctx.triggered_id
-    key_map = {"p2-sp500": "sp500", "p2-dji": "dji", "p2-ndq": "ndq"}
-    clicked = key_map[triggered]
-
+    t = ctx.triggered_id
+    key_map = {"p2-sp500":"sp500","p2-dji":"dji","p2-ndq":"ndq"}
+    clicked = key_map[t]
     pair = list(current_pair)
     if clicked in pair:
         if len(pair) > 1:
@@ -501,7 +616,6 @@ def pick_pair(n_sp, n_dji, n_ndq, current_pair):
         if len(pair) >= 2:
             pair.pop(0)
         pair.append(clicked)
-
     styles = {
         "p2-sp500": BTN_ACTIVE if "sp500" in pair else BTN_BASE,
         "p2-dji":   BTN_ACTIVE if "dji"   in pair else BTN_BASE,
@@ -510,67 +624,112 @@ def pick_pair(n_sp, n_dji, n_ndq, current_pair):
     return pair, styles["p2-sp500"], styles["p2-dji"], styles["p2-ndq"]
 
 
+# ─── Panel swap (layout 3) ────────────────────────────────────────────────────
+
+@app.callback(
+    Output("panel-order","data"),
+    Input("swap-right-0","n_clicks"),
+    Input("swap-left-1","n_clicks"),
+    Input("swap-right-1","n_clicks"),
+    Input("swap-left-2","n_clicks"),
+    State("panel-order","data"),
+    prevent_initial_call=True,
+)
+def swap_panels(r0, l1, r1, l2, order):
+    t = ctx.triggered_id
+    order = list(order)
+    if t in ("swap-right-0","swap-left-1"):
+        order[0], order[1] = order[1], order[0]
+    elif t in ("swap-right-1","swap-left-2"):
+        order[1], order[2] = order[2], order[1]
+    return order
+
+
+# ─── Date navigation ──────────────────────────────────────────────────────────
+
+@app.callback(
+    Output("selected-date","data"),
+    Output("date-display","children"),
+    Input("btn-prev-date","n_clicks"),
+    Input("btn-next-date","n_clicks"),
+    Input("btn-today","n_clicks"),
+    State("selected-date","data"),
+    prevent_initial_call=True,
+)
+def navigate_date(prev, nxt, today_c, selected):
+    t   = ctx.triggered_id
+    sel = date.fromisoformat(selected)
+    today = date.today()
+    if t == "btn-prev-date":
+        sel = sel - timedelta(days=1)
+    elif t == "btn-next-date":
+        sel = min(sel + timedelta(days=1), today)
+    else:
+        sel = today
+    label = "TODAY" if sel == today else sel.strftime("%b %d")
+    return sel.isoformat(), label
+
+
 # ─── Layout 1 callbacks ───────────────────────────────────────────────────────
 
 @app.callback(
-    Output("heatmap-1",    "figure"),
-    Output("last-updated", "children"),
+    Output("heatmap-1","figure"),
+    Output("last-updated","children"),
     Output("stocks-loaded","children"),
-    Input("tab",  "value"),
-    Input("tick", "n_intervals"),
+    Input("tab","value"),
+    Input("tick","n_intervals"),
 )
 def refresh_heatmap_1(index_key, _):
-    global _last_refresh_time
-    df  = fetch_index_data(index_key)
-    fig = build_heatmap(df)
-    wpct = compute_weighted_pct(df)
-    if wpct is not None:
-        store_snapshot(index_key, wpct)
+    with _cache_lock:
+        df = _heatmap_cache[index_key].copy()
+    fig   = build_heatmap(df)
     count = len(df) if not df.empty else 0
-    _last_refresh_time = time.time()
-    return fig, f"last updated {datetime.now().strftime('%H:%M:%S')}", f"{count} stocks"
+    ts    = datetime.fromtimestamp(_last_refresh_time).strftime("%H:%M:%S")
+    return fig, f"updated {ts}", f"{count} stocks"
 
 
 @app.callback(
-    Output("line-1",       "figure"),
-    Output("line-label-1", "children"),
-    Input("tab",  "value"),
-    Input("tick", "n_intervals"),
+    Output("line-1","figure"),
+    Output("line-label-1","children"),
+    Input("tab","value"),
+    Input("tick","n_intervals"),
+    Input("selected-date","data"),
 )
-def refresh_line_1(index_key, _):
-    fig = build_line_chart(index_key)
+def refresh_line_1(index_key, _, selected_date):
+    fig = build_line_chart(index_key, selected_date)
     with _history_lock:
-        h = _index_history[index_key]
-        last = h[-1][1] if h else None
+        entries = _index_history[index_key].get(selected_date, [])
+        last    = entries[-1][1] if entries else None
     name = INDEX_NAMES[index_key]
-    label = f"{name}  ·  WEIGHTED  ·  {last:+.2f}%" if last is not None else f"{name}  ·  WEIGHTED"
+    d_label = "" if selected_date == date.today().isoformat() \
+              else f"  ·  {date.fromisoformat(selected_date).strftime('%b %d')}"
+    label = (f"{name}  ·  WEIGHTED{d_label}  ·  {last:+.2f}%"
+             if last is not None else f"{name}  ·  WEIGHTED{d_label}")
     return fig, label
 
 
 # ─── Layout 2 callbacks ───────────────────────────────────────────────────────
 
 @app.callback(
-    Output("heatmap-2a", "figure"),
-    Output("heatmap-2b", "figure"),
-    Output("line-2a",    "figure"),
-    Output("line-2b",    "figure"),
-    Output("label-2a",   "children"),
-    Output("label-2b",   "children"),
-    Input("tick",         "n_intervals"),
-    Input("pair-store",   "data"),
-    State("layout-store", "data"),
+    Output("heatmap-2a","figure"),
+    Output("heatmap-2b","figure"),
+    Output("line-2a","figure"),
+    Output("line-2b","figure"),
+    Output("label-2a","children"),
+    Output("label-2b","children"),
+    Input("tick","n_intervals"),
+    Input("pair-store","data"),
+    Input("selected-date","data"),
+    State("layout-store","data"),
 )
-def refresh_layout_2(_, pair, layout):
+def refresh_layout_2(_, pair, selected_date, layout):
     if layout != "2":
         raise dash.exceptions.PreventUpdate
-    keys = (pair + ["sp500", "dji"])[:2]
-    dfs  = [fetch_index_data(k) for k in keys]
-    for k, df in zip(keys, dfs):
-        wpct = compute_weighted_pct(df)
-        if wpct is not None:
-            store_snapshot(k, wpct)
+    keys = (list(pair) + ["sp500","dji"])[:2]
+    with _cache_lock:
+        dfs = [_heatmap_cache[k].copy() for k in keys]
     heatmaps = [build_heatmap(df) for df in dfs]
-    lines    = [build_line_chart(k) for k in keys]
+    lines    = [build_line_chart(k, selected_date) for k in keys]
     labels   = [INDEX_NAMES[k].upper() for k in keys]
     return heatmaps[0], heatmaps[1], lines[0], lines[1], labels[0], labels[1]
 
@@ -578,39 +737,52 @@ def refresh_layout_2(_, pair, layout):
 # ─── Layout 3 callbacks ───────────────────────────────────────────────────────
 
 @app.callback(
-    Output("heatmap-3a", "figure"),
-    Output("heatmap-3b", "figure"),
-    Output("heatmap-3c", "figure"),
-    Output("line-3a",    "figure"),
-    Output("line-3b",    "figure"),
-    Output("line-3c",    "figure"),
-    Input("tick",         "n_intervals"),
-    State("layout-store", "data"),
+    Output("heatmap-3a","figure"),
+    Output("heatmap-3b","figure"),
+    Output("heatmap-3c","figure"),
+    Output("line-3a","figure"),
+    Output("line-3b","figure"),
+    Output("line-3c","figure"),
+    Output("title-3a","children"),
+    Output("title-3b","children"),
+    Output("title-3c","children"),
+    Input("tick","n_intervals"),
+    Input("panel-order","data"),
+    Input("selected-date","data"),
+    State("layout-store","data"),
 )
-def refresh_layout_3(_, layout):
+def refresh_layout_3(_, order, selected_date, layout):
     if layout != "3":
         raise dash.exceptions.PreventUpdate
-    keys = ["sp500", "dji", "ndq"]
-    dfs  = [fetch_index_data(k) for k in keys]
-    for k, df in zip(keys, dfs):
-        wpct = compute_weighted_pct(df)
-        if wpct is not None:
-            store_snapshot(k, wpct)
+    keys = list(order)
+    with _cache_lock:
+        dfs = [_heatmap_cache[k].copy() for k in keys]
     heatmaps = [build_heatmap(df) for df in dfs]
-    lines    = [build_line_chart(k) for k in keys]
-    return heatmaps[0], heatmaps[1], heatmaps[2], lines[0], lines[1], lines[2]
+    lines    = [build_line_chart(k, selected_date) for k in keys]
+    titles   = [INDEX_NAMES[k].upper() for k in keys]
+    return (heatmaps[0], heatmaps[1], heatmaps[2],
+            lines[0],    lines[1],    lines[2],
+            titles[0],   titles[1],   titles[2])
 
 
-# ─── Countdown callback ───────────────────────────────────────────────────────
+# ─── Countdown + market status ────────────────────────────────────────────────
 
 @app.callback(
-    Output("countdown", "children"),
-    Input("tick-1s", "n_intervals"),
+    Output("countdown","children"),
+    Output("market-status","children"),
+    Output("market-status","style"),
+    Input("tick-1s","n_intervals"),
 )
-def update_countdown(_):
-    elapsed = int(time.time() - _last_refresh_time)
+def update_status(_):
+    elapsed   = int(time.time() - _last_refresh_time)
     remaining = max(0, 60 - elapsed)
-    return f"NEXT UPDATE  {remaining}s"
+    if is_market_hours():
+        status       = "● MARKET OPEN"
+        status_style = {"color":"#22CC22","fontSize":"10px","marginLeft":"12px","letterSpacing":"1px"}
+    else:
+        status       = "○ MARKET CLOSED"
+        status_style = {"color":"#444444","fontSize":"10px","marginLeft":"12px","letterSpacing":"1px"}
+    return f"NEXT  {remaining}s", status, status_style
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
@@ -620,8 +792,7 @@ if __name__ == "__main__":
     print("  MARKET HEATMAP  —  Finviz Elite")
     print("="*52)
     if not API_KEY or API_KEY == "your_api_key_here":
-        print("\n  WARNING: No API key!")
-        print("  Open .env and add your FINVIZ_API_KEY\n")
+        print("\n  WARNING: No API key found in .env\n")
     else:
         print(f"\n  Opening: http://127.0.0.1:8050")
         print(f"  Stop:    Ctrl+C\n")
