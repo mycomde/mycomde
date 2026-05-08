@@ -167,11 +167,9 @@ def fetch_index_data(index_key):
         df["pct_change"] = df["pct_change"].apply(parse_change)
         df["market_cap"] = df["market_cap"].apply(parse_market_cap)
         df["price"]      = pd.to_numeric(df["price"], errors="coerce").fillna(0)
-        df["market_cap"] = df.apply(
-            lambda row: MARKET_CAPS.get(row["sym"], 5)
-            if row["market_cap"] <= 1.0
-            else row["market_cap"],
-            axis=1
+        fallback_mask = df["market_cap"] <= 1.0
+        df.loc[fallback_mask, "market_cap"] = df.loc[fallback_mask, "sym"].map(
+            lambda s: MARKET_CAPS.get(s, 5)
         )
         return df[["sym", "price", "pct_change", "market_cap"]]
     except Exception as e:
