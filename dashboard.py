@@ -290,7 +290,7 @@ def build_line_chart(index_key, selected_date=None):
         # Break the line at gaps > 2 min (terminal was closed / no data collected)
         times, values = [], []
         for i, (t, v) in enumerate(history):
-            if i > 0 and (t - history[i-1][0]).total_seconds() > 120:
+            if i > 0 and (t - history[i-1][0]).total_seconds() > 180:
                 times.append(None)
                 values.append(None)
             times.append(t)
