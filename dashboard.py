@@ -367,13 +367,13 @@ app.layout = html.Div(
                     style={"marginLeft":"auto","display":"flex","alignItems":"center","gap":"2px"},
                     children=[
                         # Date navigation
-                        html.Button("◀", id="btn-prev-date", n_clicks=0,
+                        html.Button("<<", id="btn-prev-date", n_clicks=0,
                             style={**BTN_BASE,"marginLeft":"0","padding":"3px 6px"}),
                         html.Span(id="date-display", children="TODAY",
                             style={"color":"#888888","fontSize":"10px","fontFamily":"monospace",
                                    "letterSpacing":"1px","minWidth":"58px","textAlign":"center",
                                    "display":"inline-block"}),
-                        html.Button("▶", id="btn-next-date", n_clicks=0,
+                        html.Button(">>", id="btn-next-date", n_clicks=0,
                             style={**BTN_BASE,"padding":"3px 6px"}),
                         html.Button("TODAY", id="btn-today", n_clicks=0,
                             style={**BTN_BASE,"fontSize":"9px","letterSpacing":"1px"}),
@@ -496,7 +496,7 @@ app.layout = html.Div(
                                         html.Span(id="title-3a",
                                             style={"color":"#FF3333","fontSize":"10px",
                                                    "letterSpacing":"2px","flex":"1"}),
-                                        html.Button("▶", id="swap-right-0", n_clicks=0,
+                                        html.Button(">>", id="swap-right-0", n_clicks=0,
                                             style=SWAP_BTN),
                                     ]),
                                 dcc.Graph(id="heatmap-3a",
@@ -511,13 +511,13 @@ app.layout = html.Div(
                                     style={"display":"flex","alignItems":"center",
                                            "marginBottom":"2px","flexShrink":"0"},
                                     children=[
-                                        html.Button("◀", id="swap-left-1", n_clicks=0,
+                                        html.Button("<<", id="swap-left-1", n_clicks=0,
                                             style={**SWAP_BTN,"marginRight":"4px"}),
                                         html.Span(id="title-3b",
                                             style={"color":"#FF3333","fontSize":"10px",
                                                    "letterSpacing":"2px","flex":"1",
                                                    "textAlign":"center"}),
-                                        html.Button("▶", id="swap-right-1", n_clicks=0,
+                                        html.Button(">>", id="swap-right-1", n_clicks=0,
                                             style=SWAP_BTN),
                                     ]),
                                 dcc.Graph(id="heatmap-3b",
@@ -532,7 +532,7 @@ app.layout = html.Div(
                                     style={"display":"flex","alignItems":"center",
                                            "marginBottom":"2px","flexShrink":"0"},
                                     children=[
-                                        html.Button("◀", id="swap-left-2", n_clicks=0,
+                                        html.Button("<<", id="swap-left-2", n_clicks=0,
                                             style={**SWAP_BTN,"marginRight":"4px"}),
                                         html.Span(id="title-3c",
                                             style={"color":"#FF3333","fontSize":"10px",
@@ -777,10 +777,10 @@ def update_status(_):
     elapsed   = int(time.time() - _last_refresh_time)
     remaining = max(0, 60 - elapsed)
     if is_market_hours():
-        status       = "● MARKET OPEN"
+        status       = "* MARKET OPEN"
         status_style = {"color":"#22CC22","fontSize":"10px","marginLeft":"12px","letterSpacing":"1px"}
     else:
-        status       = "○ MARKET CLOSED"
+        status       = "- MARKET CLOSED"
         status_style = {"color":"#444444","fontSize":"10px","marginLeft":"12px","letterSpacing":"1px"}
     return f"NEXT  {remaining}s", status, status_style
 
