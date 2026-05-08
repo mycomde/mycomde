@@ -219,7 +219,14 @@ def _bg_loop():
                   f"  {'(market open)' if is_market_hours() else '(market closed)'}")
         except Exception as e:
             print(f"  BG loop error: {e}")
-        time.sleep(60 if is_market_hours() else 300)
+        if is_market_hours():
+            time.sleep(60)
+        else:
+            # Check every 10s so we catch the 9:30 AM open immediately
+            for _ in range(30):
+                time.sleep(10)
+                if is_market_hours():
+                    break
 
 
 threading.Thread(target=_bg_loop, daemon=True).start()
