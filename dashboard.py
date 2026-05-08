@@ -172,13 +172,22 @@ def fetch_index_data(index_key):
         return pd.DataFrame()
 
 
-def compute_weighted_pct(df):
+def compute_weighted_pct(df, index_key="sp500"):
     if df.empty:
         return None
-    total = df["market_cap"].sum()
-    if total == 0:
-        return None
-    return (df["pct_change"] * df["market_cap"]).sum() / total
+    if index_key == "dji":
+        t = df["price"].sum()
+        if t == 0: return None
+        return (df["pct_change"] * df["price"]).sum() / t
+    float_factors = {
+        "WMT":0.47,"ORCL":0.58,"NKE":0.85,"ABNB":0.80,"TSLA":0.83,
+        "META":0.87,"GOOGL":0.88,"GOOG":0.88,"AMZN":0.90,"NVDA":0.96,
+        "NFLX":0.97,"UBER":0.91,"CRM":0.94,"SHOP":0.85,"SNAP":0.82,
+    }
+    weights = df["market_cap"] * df["sym"].map(lambda s: float_factors.get(s, 1.0))
+    total = weights.sum()
+    if total == 0: return None
+    return (df["pct_change"] * weights).sum() / total
 
 
 def store_snapshot(index_key, wpct):
@@ -202,7 +211,7 @@ def _bg_loop():
                 df = fetch_index_data(key)
                 with _cache_lock:
                     _heatmap_cache[key] = df
-                wpct = compute_weighted_pct(df)
+                wpct = compute_weighted_pct(df, key)
                 if wpct is not None:
                     store_snapshot(key, wpct)
             _last_refresh_time = time.time()
