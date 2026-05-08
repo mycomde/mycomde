@@ -287,8 +287,14 @@ def build_line_chart(index_key, selected_date=None):
             font=dict(color="#333333", size=11, family="monospace"),
             xref="paper", yref="paper")
     else:
-        times  = [h[0] for h in history]
-        values = [h[1] for h in history]
+        # Break the line at gaps > 2 min (terminal was closed / no data collected)
+        times, values = [], []
+        for i, (t, v) in enumerate(history):
+            if i > 0 and (t - history[i-1][0]).total_seconds() > 120:
+                times.append(None)
+                values.append(None)
+            times.append(t)
+            values.append(v)
         last   = values[-1]
         color      = "#22CC22" if last >= 0 else "#FF3333"
         fill_color = "rgba(34,204,34,0.05)" if last >= 0 else "rgba(255,51,51,0.05)"
