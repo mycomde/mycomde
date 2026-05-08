@@ -75,6 +75,11 @@ HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history
 _heatmap_cache: dict = {"sp500": pd.DataFrame(), "dji": pd.DataFrame(), "ndq": pd.DataFrame()}
 _cache_lock = threading.Lock()
 
+# Live float data cache — refreshed once per day from Finviz v=141
+_float_data: dict = {"sp500": {}, "dji": {}, "ndq": {}}
+_float_date: str = ""
+_float_lock = threading.Lock()
+
 
 def load_history():
     try:
@@ -174,11 +179,43 @@ def fetch_index_data(index_key):
         return pd.DataFrame()
 
 
+# Fallback float factors for key stocks (used if live fetch fails)
 FLOAT_FACTORS = {
     "WMT":0.47,"ORCL":0.58,"NKE":0.85,"ABNB":0.80,"TSLA":0.83,
     "META":0.87,"GOOGL":0.88,"GOOG":0.88,"AMZN":0.90,"NVDA":0.96,
     "NFLX":0.97,"UBER":0.91,"CRM":0.94,"SHOP":0.85,"SNAP":0.82,
 }
+
+
+def fetch_float_factors(index_key):
+    idx_filter = INDICES[index_key]["filter"]
+    url = f"https://elite.finviz.com/export?v=141&f={idx_filter}&auth={API_KEY}"
+    try:
+        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        df = pd.read_csv(io.StringIO(r.text))
+        cols = {c.lower().strip(): c for c in df.columns}
+        ticker_col = cols.get("ticker")
+        float_col  = cols.get("float")
+        out_col    = cols.get("shares outstanding") or cols.get("outstanding") or cols.get("shares out")
+        if not (ticker_col and float_col and out_col):
+            print(f"  Float: unexpected columns for {index_key}: {list(df.columns)}")
+            return {}
+        result = {}
+        for _, row in df.iterrows():
+            try:
+                f = parse_market_cap(str(row[float_col]))
+                o = parse_market_cap(str(row[out_col]))
+                if o > 0 and f > 0:
+                    result[str(row[ticker_col])] = min(f / o, 1.0)
+            except Exception:
+                pass
+        print(f"  Float data: {index_key} — {len(result)} stocks loaded")
+        return result
+    except Exception as e:
+        print(f"  Float fetch error [{index_key}]: {e}")
+        return {}
+
 
 def compute_weighted_pct(df, index_key="sp500"):
     if df.empty:
@@ -188,8 +225,11 @@ def compute_weighted_pct(df, index_key="sp500"):
         if t == 0: return None
         return (df["pct_change"] * df["price"]).sum() / t
     d = df.copy()
+    with _float_lock:
+        live = dict(_float_data.get(index_key, {}))
     d["_w"] = d.apply(
-        lambda r: r["market_cap"] * FLOAT_FACTORS.get(r["sym"], 1.0), axis=1)
+        lambda r: r["market_cap"] * live.get(r["sym"],
+                  FLOAT_FACTORS.get(r["sym"], 1.0)), axis=1)
     t = d["_w"].sum()
     if t == 0: return None
     return (d["pct_change"] * d["_w"]).sum() / t
@@ -209,9 +249,20 @@ def store_snapshot(index_key, wpct):
 
 
 def _bg_loop():
-    global _last_refresh_time
+    global _last_refresh_time, _float_date
     while True:
         try:
+            today = date.today().isoformat()
+            with _float_lock:
+                needs_float = _float_date != today
+            if needs_float:
+                for key in INDICES:
+                    factors = fetch_float_factors(key)
+                    if factors:
+                        with _float_lock:
+                            _float_data[key] = factors
+                with _float_lock:
+                    _float_date = today
             for key in INDICES:
                 df = fetch_index_data(key)
                 with _cache_lock:
