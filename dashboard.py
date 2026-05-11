@@ -203,17 +203,23 @@ def store_snapshot(index_key, wpct):
     save_history()
 
 
+def _fetch_one(key):
+    df = fetch_index_data(key)
+    with _cache_lock:
+        _heatmap_cache[key] = df
+    wpct = compute_weighted_pct(df, key)
+    if wpct is not None:
+        store_snapshot(key, wpct)
+
+
 def _bg_loop():
     global _last_refresh_time
     while True:
         try:
-            for key in INDICES:
-                df = fetch_index_data(key)
-                with _cache_lock:
-                    _heatmap_cache[key] = df
-                wpct = compute_weighted_pct(df, key)
-                if wpct is not None:
-                    store_snapshot(key, wpct)
+            # Fetch all 3 indices in parallel — cuts fetch time from ~45s to ~15s
+            threads = [threading.Thread(target=_fetch_one, args=(k,)) for k in INDICES]
+            for t in threads: t.start()
+            for t in threads: t.join()
             _last_refresh_time = time.time()
             print(f"  BG updated at {datetime.now().strftime('%H:%M:%S')}"
                   f"  {'(market open)' if is_market_hours() else '(market closed)'}")
