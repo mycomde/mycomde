@@ -412,7 +412,7 @@ app.layout = html.Div(
                         # Spacer
                         html.Span(style={"display":"inline-block","width":"14px"}),
                         html.Span(id="countdown",
-                            style={"color":"#444444","fontSize":"10px","fontFamily":"monospace",
+                            style={"color":"#888888","fontSize":"20px","fontFamily":"monospace",
                                    "letterSpacing":"1px"}),
                         html.Span(style={"display":"inline-block","width":"10px"}),
                         html.Span("LAYOUT",
