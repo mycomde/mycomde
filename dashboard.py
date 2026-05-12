@@ -204,12 +204,15 @@ def store_snapshot(index_key, wpct):
 
 
 def _fetch_one(key):
-    df = fetch_index_data(key)
-    with _cache_lock:
-        _heatmap_cache[key] = df
-    wpct = compute_weighted_pct(df, key)
-    if wpct is not None:
-        store_snapshot(key, wpct)
+    try:
+        df = fetch_index_data(key)
+        with _cache_lock:
+            _heatmap_cache[key] = df
+        wpct = compute_weighted_pct(df, key)
+        if wpct is not None:
+            store_snapshot(key, wpct)
+    except Exception as e:
+        print(f"  Fetch error [{key}]: {e}")
 
 
 def _bg_loop():
@@ -225,14 +228,17 @@ def _bg_loop():
                   f"  {'(market open)' if is_market_hours() else '(market closed)'}")
         except Exception as e:
             print(f"  BG loop error: {e}")
-        if is_market_hours():
-            time.sleep(60)
-        else:
-            # Check every 10s so we catch the 9:30 AM open immediately
-            for _ in range(30):
-                time.sleep(10)
-                if is_market_hours():
-                    break
+        try:
+            if is_market_hours():
+                time.sleep(60)
+            else:
+                # Check every 10s so we catch the 9:30 AM open immediately
+                for _ in range(30):
+                    time.sleep(10)
+                    if is_market_hours():
+                        break
+        except Exception:
+            time.sleep(10)
 
 
 threading.Thread(target=_bg_loop, daemon=True).start()
@@ -801,7 +807,8 @@ def refresh_layout_3(_, order, selected_date, layout):
 )
 def update_status(_):
     elapsed   = int(time.time() - _last_refresh_time)
-    remaining = max(0, 60 - elapsed)
+    cycle     = 60 if is_market_hours() else 300
+    remaining = max(0, cycle - elapsed)
     if is_market_hours():
         status       = "* MARKET OPEN"
         status_style = {"color":"#22CC22","fontSize":"10px","marginLeft":"12px","letterSpacing":"1px"}
