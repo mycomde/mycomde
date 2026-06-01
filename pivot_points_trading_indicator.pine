@@ -1,0 +1,35 @@
+//@version=5
+indicator("Pivot Points Trading Indicator", overlay=true)
+
+// Define input parameters
+len = input(14, title="Pivot Length")
+
+daily_high = request.security(syminfo.tickerid, 'D', high)
+daily_low = request.security(syminfo.tickerid, 'D', low)
+daily_close = request.security(syminfo.tickerid, 'D', close)
+
+// Calculate pivot points
+pivot_point = (daily_high + daily_low + daily_close) / 3
+support1 = pivot_point - (daily_high - daily_low)
+support2 = pivot_point - 2 * (daily_high - daily_low)
+support3 = pivot_point - 3 * (daily_high - daily_low)
+
+resistance1 = pivot_point + (daily_high - daily_low)
+resistance2 = pivot_point + 2 * (daily_high - daily_low)
+resistance3 = pivot_point + 3 * (daily_high - daily_low)
+
+// Plot pivot points
+plot(pivot_point, color=color.blue, title="Pivot Point")
+plot(support1, color=color.green, title="Support 1")
+plot(support2, color=color.green, title="Support 2")
+plot(support3, color=color.green, title="Support 3")
+plot(resistance1, color=color.red, title="Resistance 1")
+plot(resistance2, color=color.red, title="Resistance 2")
+plot(resistance3, color=color.red, title="Resistance 3")
+
+// Generate buy/sell signals
+buy_signal = ta.crossover(close, support1) or ta.crossover(close, support2) or ta.crossover(close, support3)
+sell_signal = ta.crossunder(close, resistance1) or ta.crossunder(close, resistance2) or ta.crossunder(close, resistance3)
+
+plotshape(series=buy_signal, title="Buy Signal", location=location.belowbar, color=color.green, style=shape.labelup, text="BUY")
+plotshape(series=sell_signal, title="Sell Signal", location=location.abovebar, color=color.red, style=shape.labeldown, text="SELL")

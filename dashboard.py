@@ -250,7 +250,7 @@ def build_heatmap(df):
         fig.add_annotation(
             text="Loading data...",
             x=0.5, y=0.5, showarrow=False,
-            font=dict(color="#FF3333", size=13, family="monospace"),
+            font=dict(color="#FF3333", size=26, family="monospace"),
             xref="paper", yref="paper")
     else:
         max_abs = max(df["pct_change"].abs().max(), 0.5)
@@ -274,7 +274,7 @@ def build_heatmap(df):
                 ],
                 cmid=0, cmin=-max_abs, cmax=max_abs, showscale=False,
                 pad=dict(t=2, b=2, l=2, r=2)),
-            textfont=dict(color="#FFFFFF", size=10, family="monospace"),
+            textfont=dict(color="#FFFFFF", size=20, family="monospace"),
             tiling=dict(squarifyratio=1)))
     fig.update_layout(
         paper_bgcolor="#000000", plot_bgcolor="#000000",
@@ -296,7 +296,7 @@ def build_line_chart(index_key, selected_date=None):
         fig.add_annotation(
             text=msg,
             x=0.5, y=0.5, showarrow=False,
-            font=dict(color="#333333", size=11, family="monospace"),
+            font=dict(color="#333333", size=22, family="monospace"),
             xref="paper", yref="paper")
     else:
         # Break the line at gaps > 2 min (terminal was closed / no data collected)
@@ -320,16 +320,16 @@ def build_line_chart(index_key, selected_date=None):
             x=times[-1], y=last,
             text=f"  {last:+.2f}%",
             showarrow=False, xanchor="left",
-            font=dict(color=color, size=11, family="monospace"))
+            font=dict(color=color, size=22, family="monospace"))
     fig.update_layout(
         paper_bgcolor="#000000", plot_bgcolor="#000000",
         margin=dict(t=5,b=5,l=55,r=70),
         font=dict(color="#555555", family="monospace"),
         xaxis=dict(showgrid=False, zeroline=False, showline=False,
-                   tickfont=dict(color="#444444",size=9),
+                   tickfont=dict(color="#444444",size=18),
                    tickformat="%H:%M", rangeslider=dict(visible=False)),
         yaxis=dict(showgrid=False, zeroline=False, showline=False,
-                   tickfont=dict(color="#444444",size=9),
+                   tickfont=dict(color="#444444",size=18),
                    ticksuffix="%", side="left"),
         hovermode="x unified",
         hoverlabel=dict(bgcolor="#111111",font_color="#CCCCCC",font_family="monospace"),
@@ -364,9 +364,9 @@ SWAP_BTN = {
     "lineHeight": "1",
 }
 
-TAB_STYLE    = {"color":"#555555","backgroundColor":"#000000","fontSize":"11px"}
+TAB_STYLE    = {"color":"#555555","backgroundColor":"#000000","fontSize":"22px"}
 TAB_SELECTED = {"color":"#FF3333","backgroundColor":"#000000",
-                "borderTop":"2px solid #FF3333","fontSize":"11px"}
+                "borderTop":"2px solid #FF3333","fontSize":"22px"}
 
 INDEX_NAMES = {"sp500": "S&P 500", "dji": "Dow Jones", "ndq": "NASDAQ 100"}
 
@@ -386,14 +386,14 @@ app.layout = html.Div(
                    "flexShrink":"0","flexWrap":"wrap","gap":"4px"},
             children=[
                 html.Span("MARKET HEATMAP",
-                    style={"color":"#FF3333","fontSize":"13px","letterSpacing":"4px"}),
+                    style={"color":"#FF3333","fontSize":"26px","letterSpacing":"4px"}),
                 html.Span(id="market-status",
-                    style={"color":"#333333","fontSize":"10px","marginLeft":"12px",
+                    style={"color":"#333333","fontSize":"20px","marginLeft":"12px",
                            "letterSpacing":"1px"}),
                 html.Span(id="last-updated",
-                    style={"color":"#333333","fontSize":"11px","marginLeft":"12px"}),
+                    style={"color":"#333333","fontSize":"22px","marginLeft":"12px"}),
                 html.Span(id="stocks-loaded",
-                    style={"color":"#444444","fontSize":"11px","marginLeft":"6px"}),
+                    style={"color":"#444444","fontSize":"22px","marginLeft":"6px"}),
                 # Right side
                 html.Div(
                     style={"marginLeft":"auto","display":"flex","alignItems":"center","gap":"2px"},
@@ -402,13 +402,13 @@ app.layout = html.Div(
                         html.Button("<<", id="btn-prev-date", n_clicks=0,
                             style={**BTN_BASE,"marginLeft":"0","padding":"3px 6px"}),
                         html.Span(id="date-display", children="TODAY",
-                            style={"color":"#888888","fontSize":"10px","fontFamily":"monospace",
+                            style={"color":"#888888","fontSize":"20px","fontFamily":"monospace",
                                    "letterSpacing":"1px","minWidth":"58px","textAlign":"center",
                                    "display":"inline-block"}),
                         html.Button(">>", id="btn-next-date", n_clicks=0,
                             style={**BTN_BASE,"padding":"3px 6px"}),
                         html.Button("TODAY", id="btn-today", n_clicks=0,
-                            style={**BTN_BASE,"fontSize":"9px","letterSpacing":"1px"}),
+                            style={**BTN_BASE,"fontSize":"18px","letterSpacing":"1px"}),
                         # Spacer
                         html.Span(style={"display":"inline-block","width":"14px"}),
                         html.Span(id="countdown",
@@ -416,7 +416,7 @@ app.layout = html.Div(
                                    "letterSpacing":"1px"}),
                         html.Span(style={"display":"inline-block","width":"10px"}),
                         html.Span("LAYOUT",
-                            style={"color":"#333","fontSize":"10px","letterSpacing":"2px"}),
+                            style={"color":"#333","fontSize":"20px","letterSpacing":"2px"}),
                         html.Button("1", id="btn-1", n_clicks=0, style=BTN_ACTIVE),
                         html.Button("2", id="btn-2", n_clicks=0, style=BTN_BASE),
                         html.Button("3", id="btn-3", n_clicks=0, style=BTN_BASE),
@@ -449,7 +449,7 @@ app.layout = html.Div(
                     style={"flex":"1 1 62%","minHeight":"0"}),
                 html.Div(style={"borderTop":"1px solid #111","margin":"4px 0","flexShrink":"0"}),
                 html.Span(id="line-label-1",
-                    style={"color":"#FF3333","fontSize":"10px","letterSpacing":"2px",
+                    style={"color":"#FF3333","fontSize":"20px","letterSpacing":"2px",
                            "marginBottom":"2px","flexShrink":"0"}),
                 dcc.Graph(id="line-1",
                     config={"displayModeBar":False,"scrollZoom":True},
@@ -464,7 +464,7 @@ app.layout = html.Div(
                     style={"display":"flex","gap":"6px","marginBottom":"6px","flexShrink":"0"},
                     children=[
                         html.Span("SHOW:",
-                            style={"color":"#333","fontSize":"10px","letterSpacing":"2px",
+                            style={"color":"#333","fontSize":"20px","letterSpacing":"2px",
                                    "alignSelf":"center"}),
                         html.Button("S&P 500",    id="p2-sp500", n_clicks=0,
                             style={**BTN_ACTIVE,"marginLeft":"6px"}),
@@ -480,7 +480,7 @@ app.layout = html.Div(
                             style={"flex":"1","display":"flex","flexDirection":"column","minHeight":"0"},
                             children=[
                                 html.Span(id="label-2a",
-                                    style={"color":"#FF3333","fontSize":"10px","letterSpacing":"2px",
+                                    style={"color":"#FF3333","fontSize":"20px","letterSpacing":"2px",
                                            "marginBottom":"2px","flexShrink":"0"}),
                                 dcc.Graph(id="heatmap-2a",
                                     config={"displayModeBar":False,"scrollZoom":True},
@@ -490,7 +490,7 @@ app.layout = html.Div(
                             style={"flex":"1","display":"flex","flexDirection":"column","minHeight":"0"},
                             children=[
                                 html.Span(id="label-2b",
-                                    style={"color":"#FF3333","fontSize":"10px","letterSpacing":"2px",
+                                    style={"color":"#FF3333","fontSize":"20px","letterSpacing":"2px",
                                            "marginBottom":"2px","flexShrink":"0"}),
                                 dcc.Graph(id="heatmap-2b",
                                     config={"displayModeBar":False,"scrollZoom":True},
@@ -526,7 +526,7 @@ app.layout = html.Div(
                                            "marginBottom":"2px","flexShrink":"0"},
                                     children=[
                                         html.Span(id="title-3a",
-                                            style={"color":"#FF3333","fontSize":"10px",
+                                            style={"color":"#FF3333","fontSize":"20px",
                                                    "letterSpacing":"2px","flex":"1"}),
                                         html.Button(">>", id="swap-right-0", n_clicks=0,
                                             style=SWAP_BTN),
@@ -546,7 +546,7 @@ app.layout = html.Div(
                                         html.Button("<<", id="swap-left-1", n_clicks=0,
                                             style={**SWAP_BTN,"marginRight":"4px"}),
                                         html.Span(id="title-3b",
-                                            style={"color":"#FF3333","fontSize":"10px",
+                                            style={"color":"#FF3333","fontSize":"20px",
                                                    "letterSpacing":"2px","flex":"1",
                                                    "textAlign":"center"}),
                                         html.Button(">>", id="swap-right-1", n_clicks=0,
@@ -567,7 +567,7 @@ app.layout = html.Div(
                                         html.Button("<<", id="swap-left-2", n_clicks=0,
                                             style={**SWAP_BTN,"marginRight":"4px"}),
                                         html.Span(id="title-3c",
-                                            style={"color":"#FF3333","fontSize":"10px",
+                                            style={"color":"#FF3333","fontSize":"20px",
                                                    "letterSpacing":"2px","flex":"1",
                                                    "textAlign":"right"}),
                                     ]),
@@ -592,7 +592,7 @@ app.layout = html.Div(
                     ]),
             ]),
 
-        dcc.Interval(id="tick",    interval=60_000, n_intervals=0),
+        dcc.Interval(id="tick",    interval=5_000, n_intervals=0),
         dcc.Interval(id="tick-1s", interval=1_000,  n_intervals=0),
     ])
 
@@ -752,7 +752,7 @@ def refresh_line_1(index_key, _, selected_date):
     Input("tick","n_intervals"),
     Input("pair-store","data"),
     Input("selected-date","data"),
-    State("layout-store","data"),
+    Input("layout-store","data"),
 )
 def refresh_layout_2(_, pair, selected_date, layout):
     if layout != "2":
@@ -781,7 +781,7 @@ def refresh_layout_2(_, pair, selected_date, layout):
     Input("tick","n_intervals"),
     Input("panel-order","data"),
     Input("selected-date","data"),
-    State("layout-store","data"),
+    Input("layout-store","data"),
 )
 def refresh_layout_3(_, order, selected_date, layout):
     if layout != "3":
@@ -811,10 +811,10 @@ def update_status(_):
     remaining = max(0, cycle - elapsed)
     if is_market_hours():
         status       = "* MARKET OPEN"
-        status_style = {"color":"#22CC22","fontSize":"10px","marginLeft":"12px","letterSpacing":"1px"}
+        status_style = {"color":"#22CC22","fontSize":"20px","marginLeft":"12px","letterSpacing":"1px"}
     else:
         status       = "- MARKET CLOSED"
-        status_style = {"color":"#444444","fontSize":"10px","marginLeft":"12px","letterSpacing":"1px"}
+        status_style = {"color":"#444444","fontSize":"20px","marginLeft":"12px","letterSpacing":"1px"}
     return f"NEXT  {remaining}s", status, status_style
 
 
